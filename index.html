@@ -1815,7 +1815,10 @@ function animate(now){
   requestAnimationFrame(animate);
   let dt = (now-lastTime)/1000;
   lastTime = now;
-  dt = Math.min(dt, 1/30); // clamp to avoid huge steps on tab switch
+  // Only guard against genuinely huge stalls (tab switch, GC pause) - a tight
+  // clamp here would otherwise turn ordinary low framerates into slow motion,
+  // since the sim would advance its clock slower than the real one.
+  dt = Math.min(dt, 1/10);
 
   Game.update(dt);
   renderer.render(scene, camera);
