@@ -340,8 +340,38 @@ input:checked + .slider:before{transform:translateX(24px);}
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r160/three.min.js"></script>
 <script>
+  // cdnjs can be unreachable on some networks/devices - fall back to other CDNs
+  // rather than leaving the loading screen spinning forever.
+  if (typeof THREE === 'undefined') {
+    document.write('<script src="https://unpkg.com/three@0.160.0/build/three.min.js"><\/script>');
+  }
+</script>
+<script>
+  if (typeof THREE === 'undefined') {
+    document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"><\/script>');
+  }
+</script>
+<script>
 (function(){
 "use strict";
+
+function showBootError(message){
+  const loading = document.getElementById('loading');
+  if(!loading) return;
+  loading.innerHTML =
+    '<div style="max-width:320px;text-align:center;padding:0 20px;">'+
+      '<div style="font-size:2em;margin-bottom:10px;">⚠️</div>'+
+      '<div style="margin-bottom:14px;">'+message+'</div>'+
+      '<button onclick="location.reload()" style="background:#ff6a3d;border:none;color:#fff;padding:10px 20px;border-radius:10px;font-size:1em;cursor:pointer;">Reload</button>'+
+    '</div>';
+}
+
+if (typeof THREE === 'undefined') {
+  showBootError('Could not load the 3D engine (Three.js) from any CDN. Check your internet connection and reload.');
+  return;
+}
+
+try {
 
 /* =========================================================================
    CONSTANTS
@@ -1799,6 +1829,11 @@ Game.init();
 onResize();
 document.getElementById('loading').classList.add('hidden');
 requestAnimationFrame(animate);
+
+} catch(e) {
+  console.error(e);
+  showBootError('Something went wrong starting the game (' + (e && e.message ? e.message : e) + '). Your browser or device may not support WebGL. Try a different browser or reload.');
+}
 
 })();
 </script>
