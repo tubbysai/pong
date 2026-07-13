@@ -891,9 +891,9 @@ class PlayerPaddle{
     const targetY = clamp(0.05 + (1-this.pointer.y)*0.75, 0.02, 0.85);
     const targetZ = PLAYER_Z - 0.35 - (1-this.pointer.y)*0.35;
     this.prevPos.copy(this.pos);
-    this.pos.x = lerp(this.pos.x, targetX, clamp(dt*18,0,1));
-    this.pos.y = lerp(this.pos.y, targetY, clamp(dt*18,0,1));
-    this.pos.z = lerp(this.pos.z, targetZ, clamp(dt*18,0,1));
+    this.pos.x = lerp(this.pos.x, targetX, clamp(dt*26,0,1));
+    this.pos.y = lerp(this.pos.y, targetY, clamp(dt*26,0,1));
+    this.pos.z = lerp(this.pos.z, targetZ, clamp(dt*26,0,1));
     this.vel.subVectors(this.pos,this.prevPos).divideScalar(Math.max(dt,0.0001));
 
     this.group.position.copy(this.pos);
@@ -1385,14 +1385,27 @@ const Game = {
     if(!allowScoring) return;
     const b = this.ball;
     const hitter = b.lastHitBy;
-    // Only check double-bounce-on-same-side fault (basic rule enforcement)
+    const hitterSide = hitter==='you' ? 'player' : 'opp';
+    const receiverSide = hitter==='you' ? 'opp' : 'player';
+    const receiverWins = hitter==='you' ? 'opp' : 'you';
     const bounces = b.bouncedSides;
+    if(bounces.length===1){
+      if(side !== receiverSide){
+        // the shot never crossed to the receiver's side - hitter's fault
+        this.endPoint(receiverWins, true);
+      }
+      return;
+    }
     if(bounces.length>=2){
       const last = bounces[bounces.length-1];
       const prev = bounces[bounces.length-2];
       if(last===prev){
-        // double bounce same side before being returned -> point to the hitter
-        this.endPoint(hitter==='you'?'you':'opp', true);
+        if(last===hitterSide){
+          this.endPoint(receiverWins, true);
+        } else {
+          // receiver failed to return after a legal bounce on their side
+          this.endPoint(hitter, true);
+        }
       }
     }
   },
@@ -1411,19 +1424,24 @@ const Game = {
     if(b.lastHitBy==='you' && !isServe) return; // already hit, wait for bounce/opponent
     if(!isServe && !b.bouncedSides.includes('player')) return; // must bounce on your side first
     const p = this.playerPaddle;
-    const dist = b.pos.distanceTo(p.pos);
-    const reach = 0.16;
-    if(dist < reach && (isServe || b.vel.z > -0.2)){
-      // must be on player's side roughly, or serve toss
-      if(!isServe && b.pos.z < 0.0) return;
-      if(isServe){
+    if(isServe){
+      if(b.pos.distanceTo(p.pos) < 0.18){
         this.performServeHit('you', p.vel, p.getRecentSwipe());
         this.state='rally';
         this.servePhase=null;
         UI.setHint('');
-      } else {
-        this.performHit('you', p.vel, p.getRecentSwipe());
       }
+      return;
+    }
+    // Rally return: forgiving per-axis reach rather than a tight 3D sphere -
+    // precisely aiming depth (z) via a 2D screen-to-world mapping is hard for
+    // a real player, so only require rough lateral/height alignment.
+    if(b.pos.z < 0.0 || b.pos.z > PLAYER_Z + 0.25) return;
+    if(b.vel.z <= -0.2) return;
+    const dx = Math.abs(b.pos.x - p.pos.x);
+    const dy = Math.abs(b.pos.y - p.pos.y);
+    if(dx < 0.3 && dy < 0.4){
+      this.performHit('you', p.vel, p.getRecentSwipe());
     }
   },
 
@@ -1455,18 +1473,21 @@ const Game = {
       }
       const targetX = rand(-HALF_WID*0.85, HALF_WID*0.85) * (1-cfg.posError) + rand(-1,1)*cfg.posError*HALF_WID;
       const targetZ = PLAYER_Z*rand(0.35,0.85);
-      const power = cfg.power * rand(2.6,3.6);
-      const dir = new THREE.Vector3(targetX-b.pos.x, 0, targetZ-b.pos.z);
-      const dist2 = dir.length(); dir.normalize();
-      const arc = rand(1.6,2.4);
-      b.vel.set(dir.x*power, arc, dir.z*power*0.55 - 0.1);
-      b.spin.top = rand(0.5,3)*cfg.speed*0.5;
-      b.spin.side = (targetX> b.pos.x?1:-1)*rand(0,1.5);
+      // Solve the shot velocity so it actually reaches (targetX,targetZ) at a
+      // chosen flight time, rather than hand-tuned constants that only cross
+      // the net for a narrow range of hit distances (a shot from deep in the
+      // court previously often fell back down short of the net entirely).
+      const flightTime = clamp(0.62 - (cfg.speed-1.35)*0.06, 0.34, 0.62);
+      const dx = targetX - b.pos.x;
+      const dz = targetZ - b.pos.z;
+      b.vel.set(dx/flightTime, 0.5*GRAVITY*flightTime, dz/flightTime);
+      b.spin.top = rand(0.3,1.5)*cfg.speed*0.35;
+      b.spin.side = (targetX> b.pos.x?1:-1)*rand(0,1.2);
       b.lastHitBy = 'opp';
       b.bouncedSides = [];
       this.opponent.swingSide = (this.opponent.x - targetX) > 0 ? 1 : -1;
       this.opponent.triggerSwing(this.opponent.swingSide>0?'fore':'back');
-      Audio_.playPaddleHit(clamp(power/10,0.3,1));
+      Audio_.playPaddleHit(clamp(Math.hypot(dx,dz)/2.5,0.3,1));
       this.rally++;
       this.rallyMax = Math.max(this.rallyMax,this.rally);
       UI.showRally(this.rally);
