@@ -412,13 +412,15 @@ const Audio_ = {
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AC();
     this.master = this.ctx.createGain();
-    this.master.gain.value = 1;
+    // the enabled flags may have been set (from saved settings) before the
+    // AudioContext existed, so initial gains must honor them, not default on
+    this.master.gain.value = this.enabled ? 1 : 0;
     this.master.connect(this.ctx.destination);
     this.sfxGain = this.ctx.createGain();
     this.sfxGain.gain.value = 0.9;
     this.sfxGain.connect(this.master);
     this.crowdGain = this.ctx.createGain();
-    this.crowdGain.gain.value = 0.05;
+    this.crowdGain.gain.value = this.crowdEnabled ? 0.04 : 0;
     this.crowdGain.connect(this.master);
   },
   resume(){
@@ -430,7 +432,7 @@ const Audio_ = {
   },
   setCrowdEnabled(v){
     this.crowdEnabled = v;
-    if(this.crowdGain) this.crowdGain.gain.setTargetAtTime(v?0.05:0, this.ctx.currentTime, 0.3);
+    if(this.crowdGain) this.crowdGain.gain.setTargetAtTime(v?0.04:0, this.ctx.currentTime, 0.3);
   },
   noiseBuffer(duration){
     const ctx=this.ctx;
@@ -550,10 +552,19 @@ const Audio_ = {
     }
     const src = this.ctx.createBufferSource();
     src.buffer = buf; src.loop = true;
+    // muffled murmur rather than broadband hiss: steep lowpass plus a slow
+    // random swell so it reads as a distant crowd instead of static
     const filt = this.ctx.createBiquadFilter();
-    filt.type='bandpass'; filt.frequency.value=700; filt.Q.value=0.5;
-    src.connect(filt); filt.connect(this.crowdGain);
-    src.start();
+    filt.type='lowpass'; filt.frequency.value=420; filt.Q.value=0.4;
+    const swell = this.ctx.createGain();
+    swell.gain.value = 0.7;
+    const lfo = this.ctx.createOscillator();
+    lfo.type='sine'; lfo.frequency.value=0.13;
+    const lfoDepth = this.ctx.createGain();
+    lfoDepth.gain.value = 0.3;
+    lfo.connect(lfoDepth); lfoDepth.connect(swell.gain);
+    src.connect(filt); filt.connect(swell); swell.connect(this.crowdGain);
+    src.start(); lfo.start();
     this.crowdSource = src;
   }
 };
@@ -1312,11 +1323,17 @@ const Game = {
   updateBallFlight(dt, allowScoring){
     const b = this.ball;
     if(!this.ballInPlay){ b.updateVisual(dt); return; }
+    const prevZ = b.pos.z, prevY = b.pos.y, prevX = b.pos.x;
     this.integrateBallFreeFlight(dt);
 
-    // net collision
-    if(Math.abs(b.pos.z) < 0.03 && b.pos.y < NET_HEIGHT+BALL_R){
-      if(Math.abs(b.pos.x) < HALF_WID+0.1){
+    // net collision: a fast ball can travel further per frame than the net is
+    // thick, so test the crossing of the z=0 plane between frames instead of
+    // sampling a thin window at the current position
+    if(prevZ !== b.pos.z && (prevZ < 0) !== (b.pos.z < 0)){
+      const f = prevZ / (prevZ - b.pos.z);
+      const yCross = prevY + (b.pos.y - prevY)*f;
+      const xCross = prevX + (b.pos.x - prevX)*f;
+      if(yCross < NET_HEIGHT+BALL_R && Math.abs(xCross) < HALF_WID+0.1){
         Audio_.playNet();
         this.serveActive = false;
         this.endPoint(b.lastHitBy==='you' ? 'opp':'you', allowScoring);
@@ -1473,16 +1490,30 @@ const Game = {
       }
       const targetX = rand(-HALF_WID*0.85, HALF_WID*0.85) * (1-cfg.posError) + rand(-1,1)*cfg.posError*HALF_WID;
       const targetZ = PLAYER_Z*rand(0.35,0.85);
-      // Solve the shot velocity so it actually reaches (targetX,targetZ) at a
-      // chosen flight time, rather than hand-tuned constants that only cross
-      // the net for a narrow range of hit distances (a shot from deep in the
-      // court previously often fell back down short of the net entirely).
-      const flightTime = clamp(0.62 - (cfg.speed-1.35)*0.06, 0.34, 0.62);
+      // Solve the shot so it lands at (targetX,targetZ) while provably
+      // clearing the net. Topspin adds Magnus downward pull in flight, so
+      // solve against an effective gravity that includes it, and if the
+      // trajectory would still cross the net too low, loft it (longer flight
+      // time keeps the same landing point, just a higher arc).
+      b.spin.top = rand(0.3,1.2)*cfg.speed*0.3;
+      b.spin.side = (targetX> b.pos.x?1:-1)*rand(0,1.0);
       const dx = targetX - b.pos.x;
       const dz = targetZ - b.pos.z;
-      b.vel.set(dx/flightTime, 0.5*GRAVITY*flightTime, dz/flightTime);
-      b.spin.top = rand(0.3,1.5)*cfg.speed*0.35;
-      b.spin.side = (targetX> b.pos.x?1:-1)*rand(0,1.2);
+      const y0 = Math.max(b.pos.y, BALL_R);
+      let T = clamp(0.62 - (cfg.speed-1.35)*0.06, 0.34, 0.62);
+      for(let i=0;i<5;i++){
+        const vz = dz/T;
+        const estSpeed = Math.min(Math.hypot(dx/T, vz), 6);
+        const gEff = GRAVITY + b.spin.top*0.9*estSpeed;
+        const vy = (0.5*gEff*T*T - y0)/T;
+        const tNet = -b.pos.z / vz;
+        const yNet = y0 + vy*tNet - 0.5*gEff*tNet*tNet;
+        if(yNet > NET_HEIGHT + 0.07 || i===4){
+          b.vel.set(dx/T, vy, vz);
+          break;
+        }
+        T *= 1.22;
+      }
       b.lastHitBy = 'opp';
       b.bouncedSides = [];
       this.opponent.swingSide = (this.opponent.x - targetX) > 0 ? 1 : -1;
